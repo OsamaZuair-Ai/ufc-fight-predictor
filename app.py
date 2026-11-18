@@ -14,20 +14,23 @@ st.set_page_config(
 st.title("🥊 UFC Fight Winner Predictor")
 st.markdown("Select two fighters from the database to predict the match outcome using Machine Learning.")
 
-# Load Trained Model, Scaler, Imputer, and Fighter Dataset
+# Load Trained Model, Scaler, Imputer, Features List, and Fighter Dataset
 @st.cache_resource
 def load_assets():
     model = joblib.load('ufc_rf_model.pkl')
     scaler = joblib.load('ufc_scaler.pkl')
     imputer = joblib.load('ufc_imputer.pkl')
+    model_features = joblib.load('model_features.pkl')
     df_fighters = pd.read_csv('Fighters.csv')
-    return model, scaler, imputer, df_fighters
+    return model, scaler, imputer, model_features, df_fighters
 
+# Execute asset loading properly
 try:
-    model, scaler, imputer, df_fighters = load_assets()
-    st.sidebar.success("Random Forest Model & Assets loaded successfully!")
+    model, scaler, imputer, model_features, df_fighters = load_assets()
+    st.sidebar.success("Model & Assets loaded successfully!")
 except Exception as e:
-    st.sidebar.error("Error loading files. Ensure 'Fighters.csv', 'ufc_rf_model.pkl', 'ufc_scaler.pkl', and 'ufc_imputer.pkl' exist in directory.")
+    st.sidebar.error(f"Error loading files: {e}")
+    st.stop()
 
 # Extract sorted unique list of fighter names
 fighter_names = sorted(df_fighters['Full Name'].dropna().unique().tolist())
@@ -79,70 +82,60 @@ if st.button("🚀 Predict Winner", use_container_width=True):
             try:
                 return float(val)
             except:
-                return 0.0
+                return np.nan
 
-        # Strict Female Identification Check using Names & Weight/Category Attributes
-        known_female_keywords = [
-            'rose namajunas', 'weili zhang', 'amanda nunes', 'valentina shevchenko', 
-            'holly holm', 'jessica andrade', 'marina rodriguez', 'yan xiaonan', 
-            'joanna jedrzejczyk', 'carla esparza', 'julianna pena', 'alexa grasso',
-            'erin blanchfield', 'manon fiorot', 'tatiana suarez', 'kayla harrison'
-        ]
-        
-        def check_if_female(fighter_name, fighter_row):
-            name_lower = str(fighter_name).lower()
-            if any(fem in name_lower for fem in known_female_keywords):
-                return True
-            
-            # Check weight class string if available
-            weight_class_val = str(fighter_row.get('Weight_Class', '')).lower()
-            if 'women' in weight_class_val or 'female' in weight_class_val:
-                return True
-                
-            return False
+        # Extract stats for both fighters
+        w1, l1 = clean_val(f1_data.get('W', 0)), clean_val(f1_data.get('L', 0))
+        w2, l2 = clean_val(f2_data.get('W', 0)), clean_val(f2_data.get('L', 0))
 
-        f1_is_female = check_if_female(fighter_1, f1_data)
-        f2_is_female = check_if_female(fighter_2, f2_data)
+        win_rate_1 = w1 / (w1 + l1 + 1e-5)
+        win_rate_2 = w2 / (w2 + l2 + 1e-5)
 
-        if f1_is_female != f2_is_female:
-            st.error("🚫 Invalid Matchup: Intergender fights (Male vs Female) are strictly prohibited. Please select fighters from the same division.")
+        ht_1, ht_2 = clean_val(f1_data.get('Ht.')), clean_val(f2_data.get('Ht.'))
+        wt_1, wt_2 = clean_val(f1_data.get('Wt.')), clean_val(f2_data.get('Wt.'))
+        reach_1, reach_2 = clean_val(f1_data.get('Reach')), clean_val(f2_data.get('Reach'))
+
+        diff_win_rate = win_rate_1 - win_rate_2
+        diff_reach = reach_1 - reach_2 if (not np.isnan(reach_1) and not np.isnan(reach_2)) else np.nan
+        diff_ht = ht_1 - ht_2 if (not np.isnan(ht_1) and not np.isnan(ht_2)) else np.nan
+        diff_total_fights = (w1 + l1) - (w2 + l2)
+
+        # Build raw dict matching original feature names
+        input_data = {
+            'Ht._1': ht_1, 'Wt._1': wt_1, 'Reach_1': reach_1,
+            'Ht._2': ht_2, 'Wt._2': wt_2, 'Reach_2': reach_2,
+            'Diff_Win_Rate': diff_win_rate,
+            'Diff_Reach': diff_reach,
+            'Diff_Ht': diff_ht,
+            'Diff_Total_Fights': diff_total_fights,
+            'Weight_Class': f1_data.get('Weight_Class', 'Lightweight'),
+            'Stance_1': f1_data.get('Stance', 'Orthodox'),
+            'Stance_2': f2_data.get('Stance', 'Orthodox')
+        }
+
+        # Convert input to DataFrame & apply One-Hot Encoding
+        input_df = pd.DataFrame([input_data])
+        categorical_cols = ['Weight_Class', 'Stance_1', 'Stance_2']
+        input_encoded = pd.get_dummies(input_df, columns=categorical_cols, dtype=int)
+
+        # Reindex columns to strictly match trained model features
+        final_input = input_encoded.reindex(columns=model_features, fill_value=0)
+
+        # Impute missing values & scale features
+        features_clean = imputer.transform(final_input)
+        scaled_features = scaler.transform(features_clean)
+
+        # Predict outcome using model
+        prediction = model.predict(scaled_features)[0]
+        prediction_proba = model.predict_proba(scaled_features)[0]
+
+        # Display Winner Result
+        st.markdown("### 🏆 Predicted Winner")
+        if prediction == 1:
+            winner = fighter_1
+            confidence = prediction_proba[1] * 100
         else:
-            # Calculate Raw Statistics & Rates
-            w1, l1 = clean_val(f1_data.get('W', 0)), clean_val(f1_data.get('L', 0))
-            w2, l2 = clean_val(f2_data.get('W', 0)), clean_val(f2_data.get('L', 0))
-
-            win_rate_1 = w1 / (w1 + l1 + 1e-5)
-            win_rate_2 = w2 / (w2 + l2 + 1e-5)
-
-            diff_win_rate = win_rate_1 - win_rate_2
-            diff_reach = clean_val(f1_data.get('Reach', 0)) - clean_val(f2_data.get('Reach', 0))
-            diff_ht = clean_val(f1_data.get('Ht.', 0)) - clean_val(f2_data.get('Ht.', 0))
-            diff_total_fights = (w1 + l1) - (w2 + l2)
-
-            # Align features array to expected shape
-            expected_features_count = scaler.n_features_in_
-            features_array = np.zeros((1, expected_features_count))
-
-            # Insert engineered features into the leading indices
-            features_array[0, :4] = [diff_win_rate, diff_reach, diff_ht, diff_total_fights]
-
-            # Impute and scale input features
-            features_clean = imputer.transform(features_array)
-            scaled_features = scaler.transform(features_clean)
-
-            # Generate Prediction using Random Forest Model
-            prediction = model.predict(scaled_features)[0]
-            prediction_proba = model.predict_proba(scaled_features)[0]
-
-            # Display Winner Result
-            st.markdown("### 🏆 Predicted Winner")
-            if prediction == 1:
-                winner = fighter_1
-                confidence = prediction_proba[1] * 100
-            else:
-                winner = fighter_2
-                confidence = prediction_proba[0] * 100
-                
-            st.success(f"🎉 **{winner}** is predicted to WIN! (Confidence: {confidence:.1f}%)")
-
-       
+            winner = fighter_2
+            confidence = prediction_proba[0] * 100
+            
+        st.success(f"🎉 **{winner}** is predicted to WIN! (Confidence: {confidence:.1f}%)")
